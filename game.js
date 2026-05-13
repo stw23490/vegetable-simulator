@@ -103,7 +103,16 @@ let state = {
   lastThought: 0,
   stars: [],
   raindrops: [],
+  audioStarted: false,
 };
+
+// Audio context and nodes
+let audioCtx = null;
+let ambientGain = null;
+let windNode = null;
+let birdsInterval = null;
+let rainGain = null;
+let nightGain = null;
 
 // Time acceleration: 1 real second = 1 game minute
 const TIME_SCALE = 60; // 1 real second = 1 game minute, full day in 24 minutes
@@ -135,6 +144,12 @@ function selectVeggie(veg) {
   state.currentVeggie = veg;
   state.started = true;
   state.timeOfDay = 8; // Start at 8am
+  
+  // Start audio on user interaction (required by browsers)
+  if (!state.audioStarted) {
+    initAudio();
+    state.audioStarted = true;
+  }
   
   // Apply veggie appearance
   const vegEl = document.getElementById('vegetable');
@@ -265,6 +280,7 @@ function startRain() {
   if (state.weather === 'rain') return;
   state.weather = 'rain';
   document.getElementById('world').classList.add('raining');
+  startRainAudio();
   
   const particles = document.getElementById('particles');
   for (let i = 0; i < 60; i++) {
@@ -282,6 +298,7 @@ function startRain() {
 function stopRain() {
   state.weather = 'clear';
   document.getElementById('world').classList.remove('raining');
+  stopRainAudio();
   state.raindrops.forEach(d => d.remove());
   state.raindrops = [];
 }
@@ -311,6 +328,9 @@ function showThought() {
   const thought = pool[Math.floor(Math.random() * pool.length)];
   textEl.textContent = thought;
   textEl.classList.add('show');
+  
+  // Speak the thought in a soothing voice
+  speakThought(thought);
   
   setTimeout(() => {
     textEl.classList.remove('show');
@@ -403,6 +423,7 @@ function gameLoop(timestamp) {
     updateSky();
     updateWeather();
     updateSeason();
+    updateAudio();
     maybeShowFace();
   }
   
@@ -415,6 +436,289 @@ document.addEventListener('dblclick', (e) => {
   if (!state.started) return;
   if (e.target.closest('#vegetable-container')) return;
   showVeggiePicker();
+});
+
+// ==================== AUDIO SYSTEM ====================
+
+function initAudio() {
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  
+  // Master ambient gain
+  ambientGain = audioCtx.createGain();
+  ambientGain.gain.value = 0.3;
+  ambientGain.connect(audioCtx.destination);
+  
+  // Start ambient wind/drone
+  startAmbientDrone();
+  startWind();
+  startBirds();
+  
+  // Rain gain node (silent until rain starts)
+  rainGain = audioCtx.createGain();
+  rainGain.gain.value = 0;
+  rainGain.connect(ambientGain);
+  
+  // Night crickets gain
+  nightGain = audioCtx.createGain();
+  nightGain.gain.value = 0;
+  nightGain.connect(ambientGain);
+  startCrickets();
+}
+
+// Soft ambient drone - a warm pad sound
+function startAmbientDrone() {
+  const osc1 = audioCtx.createOscillator();
+  const osc2 = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  const filter = audioCtx.createBiquadFilter();
+  
+  osc1.type = 'sine';
+  osc1.frequency.value = 85; // Low hum
+  osc2.type = 'sine';
+  osc2.frequency.value = 170; // Octave above
+  
+  filter.type = 'lowpass';
+  filter.frequency.value = 200;
+  filter.Q.value = 1;
+  
+  gain.gain.value = 0.15;
+  
+  osc1.connect(filter);
+  osc2.connect(filter);
+  filter.connect(gain);
+  gain.connect(ambientGain);
+  
+  osc1.start();
+  osc2.start();
+  
+  // Slowly modulate frequency for organic feel
+  const lfo = audioCtx.createOscillator();
+  const lfoGain = audioCtx.createGain();
+  lfo.type = 'sine';
+  lfo.frequency.value = 0.05; // Very slow
+  lfoGain.gain.value = 3;
+  lfo.connect(lfoGain);
+  lfoGain.connect(osc1.frequency);
+  lfo.start();
+}
+
+// Wind - filtered noise
+function startWind() {
+  const bufferSize = audioCtx.sampleRate * 2;
+  const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < bufferSize; i++) {
+    data[i] = Math.random() * 2 - 1;
+  }
+  
+  const noise = audioCtx.createBufferSource();
+  noise.buffer = buffer;
+  noise.loop = true;
+  
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = 'bandpass';
+  filter.frequency.value = 400;
+  filter.Q.value = 0.5;
+  
+  const gain = audioCtx.createGain();
+  gain.gain.value = 0.08;
+  
+  noise.connect(filter);
+  filter.connect(gain);
+  gain.connect(ambientGain);
+  noise.start();
+  
+  // Modulate wind filter for gusts
+  const lfo = audioCtx.createOscillator();
+  const lfoGain = audioCtx.createGain();
+  lfo.type = 'sine';
+  lfo.frequency.value = 0.1;
+  lfoGain.gain.value = 200;
+  lfo.connect(lfoGain);
+  lfoGain.connect(filter.frequency);
+  lfo.start();
+  
+  windNode = { noise, filter, gain };
+}
+
+// Bird chirps - occasional random tones
+function startBirds() {
+  function chirp() {
+    if (!audioCtx || !state.started) return;
+    // Only chirp during daytime
+    if (state.timeOfDay < 6 || state.timeOfDay > 19) return;
+    
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    
+    osc.type = 'sine';
+    const baseFreq = 2000 + Math.random() * 2000;
+    osc.frequency.setValueAtTime(baseFreq, audioCtx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(baseFreq * (0.8 + Math.random() * 0.4), audioCtx.currentTime + 0.1);
+    osc.frequency.exponentialRampToValueAtTime(baseFreq * 1.2, audioCtx.currentTime + 0.15);
+    
+    gain.gain.setValueAtTime(0, audioCtx.currentTime);
+    gain.gain.linearRampToValueAtTime(0.03, audioCtx.currentTime + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.2);
+    
+    osc.connect(gain);
+    gain.connect(ambientGain);
+    osc.start();
+    osc.stop(audioCtx.currentTime + 0.25);
+    
+    // Sometimes do a second chirp
+    if (Math.random() < 0.5) {
+      setTimeout(chirp, 100 + Math.random() * 200);
+    }
+  }
+  
+  birdsInterval = setInterval(() => {
+    if (Math.random() < 0.3) chirp();
+  }, 4000 + Math.random() * 6000);
+}
+
+// Night crickets
+function startCrickets() {
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  const lfo = audioCtx.createOscillator();
+  const lfoGain = audioCtx.createGain();
+  
+  osc.type = 'sine';
+  osc.frequency.value = 4200;
+  
+  // Rapid on-off for cricket sound
+  lfo.type = 'square';
+  lfo.frequency.value = 15;
+  lfoGain.gain.value = 0.02;
+  
+  lfo.connect(lfoGain);
+  osc.connect(gain);
+  gain.gain.value = 0.02;
+  gain.connect(nightGain);
+  
+  osc.start();
+  lfo.start();
+  
+  // Modulate cricket with LFO
+  lfo.connect(gain.gain);
+}
+
+// Rain sound
+function startRainAudio() {
+  if (!audioCtx) return;
+  
+  const bufferSize = audioCtx.sampleRate * 2;
+  const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < bufferSize; i++) {
+    data[i] = Math.random() * 2 - 1;
+  }
+  
+  const noise = audioCtx.createBufferSource();
+  noise.buffer = buffer;
+  noise.loop = true;
+  
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = 'highpass';
+  filter.frequency.value = 1000;
+  filter.Q.value = 0.3;
+  
+  const filter2 = audioCtx.createBiquadFilter();
+  filter2.type = 'lowpass';
+  filter2.frequency.value = 8000;
+  
+  noise.connect(filter);
+  filter.connect(filter2);
+  filter2.connect(rainGain);
+  noise.start();
+  
+  // Fade in rain sound
+  rainGain.gain.linearRampToValueAtTime(0.4, audioCtx.currentTime + 3);
+  
+  state.rainAudioNode = noise;
+}
+
+function stopRainAudio() {
+  if (!audioCtx || !rainGain) return;
+  rainGain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 2);
+  if (state.rainAudioNode) {
+    setTimeout(() => {
+      try { state.rainAudioNode.stop(); } catch(e) {}
+      state.rainAudioNode = null;
+    }, 2500);
+  }
+}
+
+// Update ambient audio based on time of day
+function updateAudio() {
+  if (!audioCtx || !state.started) return;
+  
+  const hour = state.timeOfDay;
+  
+  // Night crickets fade in/out
+  if (nightGain) {
+    const isNight = hour >= 20 || hour < 5;
+    const targetVol = isNight ? 0.5 : 0;
+    nightGain.gain.linearRampToValueAtTime(targetVol, audioCtx.currentTime + 2);
+  }
+}
+
+// ==================== SPEECH SYNTHESIS ====================
+
+function speakThought(text) {
+  if (!('speechSynthesis' in window)) return;
+  if (soundMuted) return;
+  
+  // Don't speak if already speaking
+  if (window.speechSynthesis.speaking) return;
+  
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.rate = 0.75; // Slow and soothing
+  utterance.pitch = 0.85; // Slightly lower pitch
+  utterance.volume = 0.6; // Soft volume
+  
+  // Try to find a soothing voice
+  const voices = window.speechSynthesis.getVoices();
+  const preferred = voices.find(v => 
+    v.name.includes('Samantha') || 
+    v.name.includes('Karen') ||
+    v.name.includes('Daniel') ||
+    v.name.includes('Google UK English Female') ||
+    v.name.includes('Microsoft Zira') ||
+    v.name.includes('Microsoft Hazel') ||
+    (v.lang.startsWith('en') && v.name.toLowerCase().includes('female'))
+  ) || voices.find(v => v.lang.startsWith('en'));
+  
+  if (preferred) utterance.voice = preferred;
+  
+  window.speechSynthesis.speak(utterance);
+}
+
+// Preload voices
+if ('speechSynthesis' in window) {
+  window.speechSynthesis.getVoices();
+  window.speechSynthesis.onvoiceschanged = () => window.speechSynthesis.getVoices();
+}
+
+// ==================== SOUND TOGGLE ====================
+
+let soundMuted = false;
+document.addEventListener('DOMContentLoaded', () => {
+  const btn = document.getElementById('sound-toggle');
+  if (btn) {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      soundMuted = !soundMuted;
+      btn.textContent = soundMuted ? '🔇' : '🔊';
+      if (audioCtx && ambientGain) {
+        ambientGain.gain.linearRampToValueAtTime(soundMuted ? 0 : 0.3, audioCtx.currentTime + 0.5);
+      }
+      if (soundMuted && window.speechSynthesis.speaking) {
+        window.speechSynthesis.cancel();
+      }
+    });
+  }
 });
 
 init();
