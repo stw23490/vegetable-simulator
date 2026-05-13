@@ -1,0 +1,9 @@
+{
+  "name": "vegetable-simulator",
+  "version": "1.0.0",
+  "description": "Experience life as a vegetable. No goals. No controls. Just existence.",
+  "scripts": {
+    "start": "npx serve .",
+    "dev": "npx serve . -l 3000"
+  }
+}
